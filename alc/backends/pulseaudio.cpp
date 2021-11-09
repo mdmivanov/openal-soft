@@ -785,7 +785,7 @@ void PulsePlayback::sinkInfoCallback(pa_context*, const pa_sink_info *info, int 
         { DevFmtX71, X71ChanMap },
         { DevFmtX61, X61ChanMap },
         { DevFmtX51, X51ChanMap },
-        { DevFmtX51, X51RearChanMap },
+        { DevFmtX51Rear, X51RearChanMap },
         { DevFmtQuad, QuadChanMap },
         { DevFmtStereo, StereoChanMap },
         { DevFmtMono, MonoChanMap }
@@ -815,8 +815,8 @@ void PulsePlayback::sinkInfoCallback(pa_context*, const pa_sink_info *info, int 
 
     if(info->active_port)
         TRACE("Active port: %s (%s)\n", info->active_port->name, info->active_port->description);
-    mDevice->Flags.set(DirectEar, (info->active_port
-        && strcmp(info->active_port->name, "analog-output-headphones") == 0));
+    mDevice->IsHeadphones = (mDevice->FmtChans == DevFmtStereo
+        && info->active_port && strcmp(info->active_port->name, "analog-output-headphones") == 0);
 }
 
 void PulsePlayback::sinkNameCallback(pa_context*, const pa_sink_info *info, int eol) noexcept
@@ -956,6 +956,9 @@ bool PulsePlayback::reset()
         break;
     case DevFmtX51:
         chanmap = X51ChanMap;
+        break;
+    case DevFmtX51Rear:
+        chanmap = X51RearChanMap;
         break;
     case DevFmtX61:
         chanmap = X61ChanMap;
@@ -1234,6 +1237,9 @@ void PulseCapture::open(const char *name)
         break;
     case DevFmtX51:
         chanmap = X51ChanMap;
+        break;
+    case DevFmtX51Rear:
+        chanmap = X51RearChanMap;
         break;
     case DevFmtX61:
         chanmap = X61ChanMap;

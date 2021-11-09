@@ -25,12 +25,12 @@ void al_print(LogLevel level, FILE *logfile, const char *fmt, ...)
     std::va_list args, args2;
     va_start(args, fmt);
     va_copy(args2, args);
-    const int msglen{std::vsnprintf(str, sizeof(stcmsg), fmt, args)};
-    if(unlikely(msglen >= 0 && static_cast<size_t>(msglen) >= sizeof(stcmsg)))
+    int msglen{std::vsnprintf(str, sizeof(stcmsg), fmt, args)};
+    if UNLIKELY(msglen >= 0 && static_cast<size_t>(msglen) >= sizeof(stcmsg))
     {
         dynmsg.resize(static_cast<size_t>(msglen) + 1u);
         str = dynmsg.data();
-        std::vsnprintf(str, dynmsg.size(), fmt, args2);
+        msglen = std::vsnprintf(str, dynmsg.size(), fmt, args2);
     }
     va_end(args2);
     va_end(args);
@@ -41,13 +41,7 @@ void al_print(LogLevel level, FILE *logfile, const char *fmt, ...)
         fputws(wstr.c_str(), logfile);
         fflush(logfile);
     }
-    /* OutputDebugStringW has no 'level' property to distinguish between
-     * informational, warning, or error debug messages. So only print them for
-     * non-Release builds.
-     */
-#ifndef NDEBUG
     OutputDebugStringW(wstr.c_str());
-#endif
 }
 
 #else
@@ -65,12 +59,12 @@ void al_print(LogLevel level, FILE *logfile, const char *fmt, ...)
     std::va_list args, args2;
     va_start(args, fmt);
     va_copy(args2, args);
-    const int msglen{std::vsnprintf(str, sizeof(stcmsg), fmt, args)};
-    if(unlikely(msglen >= 0 && static_cast<size_t>(msglen) >= sizeof(stcmsg)))
+    int msglen{std::vsnprintf(str, sizeof(stcmsg), fmt, args)};
+    if UNLIKELY(msglen >= 0 && static_cast<size_t>(msglen) >= sizeof(stcmsg))
     {
         dynmsg.resize(static_cast<size_t>(msglen) + 1u);
         str = dynmsg.data();
-        std::vsnprintf(str, dynmsg.size(), fmt, args2);
+        msglen = std::vsnprintf(str, dynmsg.size(), fmt, args2);
     }
     va_end(args2);
     va_end(args);

@@ -198,7 +198,7 @@ al::optional<std::string> AmbDecConf::load(const char *fname) noexcept
             return al::make_optional("Malformed line: "+buffer);
 
         if(command == "/description")
-            readline(istr, Description);
+            istr >> Description;
         else if(command == "/version")
         {
             istr >> Version;

@@ -347,13 +347,8 @@ inline uint dither_rng(uint *seed) noexcept
 
 inline auto& GetAmbiScales(AmbiScaling scaletype) noexcept
 {
-    switch(scaletype)
-    {
-    case AmbiScaling::FuMa: return AmbiScale::FromFuMa();
-    case AmbiScaling::SN3D: return AmbiScale::FromSN3D();
-    case AmbiScaling::UHJ: return AmbiScale::FromUHJ();
-    case AmbiScaling::N3D: break;
-    }
+    if(scaletype == AmbiScaling::FuMa) return AmbiScale::FromFuMa();
+    if(scaletype == AmbiScaling::SN3D) return AmbiScale::FromSN3D();
     return AmbiScale::FromN3D();
 }
 
@@ -391,9 +386,6 @@ bool CalcListenerParams(ContextBase *ctx)
         std::memory_order_acq_rel)};
     if(!props) return false;
 
-    const alu::Vector pos{props->Position[0], props->Position[1], props->Position[2], 1.0f};
-    ctx->mParams.Position = pos;
-
     /* AT then UP */
     alu::Vector N{props->OrientAt[0], props->OrientAt[1], props->OrientAt[2], 0.0f};
     N.normalize();
@@ -403,15 +395,21 @@ bool CalcListenerParams(ContextBase *ctx)
     alu::Vector U{N.cross_product(V)};
     U.normalize();
 
-    const alu::Matrix rot{
+    const alu::MatrixR<double> rot{
         U[0], V[0], -N[0], 0.0,
         U[1], V[1], -N[1], 0.0,
         U[2], V[2], -N[2], 0.0,
          0.0,  0.0,   0.0, 1.0};
-    const alu::Vector vel{props->Velocity[0], props->Velocity[1], props->Velocity[2], 0.0};
+    const alu::VectorR<double> pos{props->Position[0],props->Position[1],props->Position[2],1.0};
+    const alu::VectorR<double> vel{props->Velocity[0],props->Velocity[1],props->Velocity[2],0.0};
+    const alu::Vector P{alu::cast_to<float>(rot * pos)};
 
-    ctx->mParams.Matrix = rot;
-    ctx->mParams.Velocity = rot * vel;
+    ctx->mParams.Matrix = alu::Matrix{
+         U[0],  V[0], -N[0], 0.0f,
+         U[1],  V[1], -N[1], 0.0f,
+         U[2],  V[2], -N[2], 0.0f,
+        -P[0], -P[1], -P[2], 1.0f};
+    ctx->mParams.Velocity = alu::cast_to<float>(rot * vel);
 
     ctx->mParams.Gain = props->Gain * ctx->mGainBoost;
     ctx->mParams.MetersPerUnit = props->MetersPerUnit;
@@ -468,8 +466,7 @@ bool CalcEffectSlotParams(EffectSlot *slot, EffectSlot **sorted_slots, ContextBa
         auto evt_vec = ring->getWriteVector();
         if LIKELY(evt_vec.first.len > 0)
         {
-            AsyncEvent *evt{al::construct_at(reinterpret_cast<AsyncEvent*>(evt_vec.first.buf),
-                AsyncEvent::ReleaseEffectState)};
+            AsyncEvent *evt{::new(evt_vec.first.buf) AsyncEvent{EventType_ReleaseEffectState}};
             evt->u.mEffectState = oldstate;
             ring->writeAdvance(1);
         }
@@ -740,6 +737,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
 
     DirectMode DirectChannels{props->DirectChannels};
     const ChanMap *chans{nullptr};
+    float downmix_gain{1.0f};
     switch(voice->mFmtChannels)
     {
     case FmtMono:
@@ -757,14 +755,38 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
             StereoMap[0].angle = WrapRadians(-props->StereoPan[0]);
             StereoMap[1].angle = WrapRadians(-props->StereoPan[1]);
         }
+
         chans = StereoMap;
+        downmix_gain = 1.0f / 2.0f;
         break;
 
-    case FmtRear: chans = RearMap; break;
-    case FmtQuad: chans = QuadMap; break;
-    case FmtX51: chans = X51Map; break;
-    case FmtX61: chans = X61Map; break;
-    case FmtX71: chans = X71Map; break;
+    case FmtRear:
+        chans = RearMap;
+        downmix_gain = 1.0f / 2.0f;
+        break;
+
+    case FmtQuad:
+        chans = QuadMap;
+        downmix_gain = 1.0f / 4.0f;
+        break;
+
+    case FmtX51:
+        chans = X51Map;
+        /* NOTE: Excludes LFE. */
+        downmix_gain = 1.0f / 5.0f;
+        break;
+
+    case FmtX61:
+        chans = X61Map;
+        /* NOTE: Excludes LFE. */
+        downmix_gain = 1.0f / 6.0f;
+        break;
+
+    case FmtX71:
+        chans = X71Map;
+        /* NOTE: Excludes LFE. */
+        downmix_gain = 1.0f / 7.0f;
+        break;
 
     case FmtBFormat2D:
     case FmtBFormat3D:
@@ -976,7 +998,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
             GetHrtfCoeffs(Device->mHrtf.get(), ev, az, Distance, Spread,
                 voice->mChans[0].mDryParams.Hrtf.Target.Coeffs,
                 voice->mChans[0].mDryParams.Hrtf.Target.Delay);
-            voice->mChans[0].mDryParams.Hrtf.Target.Gain = DryGain.Base;
+            voice->mChans[0].mDryParams.Hrtf.Target.Gain = DryGain.Base * downmix_gain;
 
             /* Remaining channels use the same results as the first. */
             for(size_t c{1};c < num_channels;c++)
@@ -999,7 +1021,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
                 for(uint i{0};i < NumSends;i++)
                 {
                     if(const EffectSlot *Slot{SendSlots[i]})
-                        ComputePanGains(&Slot->Wet, coeffs.data(), WetGain[i].Base,
+                        ComputePanGains(&Slot->Wet, coeffs.data(), WetGain[i].Base * downmix_gain,
                             voice->mChans[c].mWetParams[i].Gains.Target);
                 }
             }
@@ -1088,12 +1110,12 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
                     continue;
                 }
 
-                ComputePanGains(&Device->Dry, coeffs.data(), DryGain.Base,
+                ComputePanGains(&Device->Dry, coeffs.data(), DryGain.Base * downmix_gain,
                     voice->mChans[c].mDryParams.Gains.Target);
                 for(uint i{0};i < NumSends;i++)
                 {
                     if(const EffectSlot *Slot{SendSlots[i]})
-                        ComputePanGains(&Slot->Wet, coeffs.data(), WetGain[i].Base,
+                        ComputePanGains(&Slot->Wet, coeffs.data(), WetGain[i].Base * downmix_gain,
                             voice->mChans[c].mWetParams[i].Gains.Target);
                 }
             }
@@ -1296,7 +1318,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
     if(!props->HeadRelative)
     {
         /* Transform source vectors */
-        Position = context->mParams.Matrix * (Position - context->mParams.Position);
+        Position = context->mParams.Matrix * Position;
         Velocity = context->mParams.Matrix * Velocity;
         Direction = context->mParams.Matrix * Direction;
     }
@@ -1308,7 +1330,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
 
     const bool directional{Direction.normalize() > 0.0f};
     alu::Vector ToSource{Position[0], Position[1], Position[2], 0.0f};
-    const float Distance{ToSource.normalize()};
+    const float Distance{ToSource.normalize(props->RefDistance / 1024.0f)};
 
     /* Initial source gain */
     GainTriplet DryGain{props->Gain, 1.0f, 1.0f};
@@ -1386,7 +1408,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
     /* Calculate directional soundcones */
     if(directional && props->InnerAngle < 360.0f)
     {
-        const float Angle{Rad2Deg(std::acos(-Direction.dot_product(ToSource)) * ConeScale * 2.0f)};
+        const float Angle{Rad2Deg(std::acos(Direction.dot_product(ToSource)) * ConeScale * -2.0f)};
 
         float ConeGain, ConeHF;
         if(!(Angle > props->InnerAngle))
@@ -1557,8 +1579,7 @@ void SendSourceStateEvent(ContextBase *context, uint id, VChangeState state)
     auto evt_vec = ring->getWriteVector();
     if(evt_vec.first.len < 1) return;
 
-    AsyncEvent *evt{al::construct_at(reinterpret_cast<AsyncEvent*>(evt_vec.first.buf),
-        AsyncEvent::SourceStateChange)};
+    AsyncEvent *evt{::new(evt_vec.first.buf) AsyncEvent{EventType_SourceStateChange}};
     evt->u.srcstate.id = id;
     switch(state)
     {
@@ -1669,7 +1690,7 @@ void ProcessVoiceChanges(ContextBase *ctx)
             }
             oldvoice->mPendingChange.store(false, std::memory_order_release);
         }
-        if(sendevt && (enabledevt&AsyncEvent::SourceStateChange))
+        if(sendevt && (enabledevt&EventType_SourceStateChange))
             SendSourceStateEvent(ctx, cur->mSourceID, cur->mState);
 
         next = cur->mNext.load(std::memory_order_acquire);
@@ -1892,8 +1913,7 @@ void Write(const al::span<const FloatBufferLine> InBuffer, void *OutBuffer, cons
     ASSUME(FrameStep > 0);
     ASSUME(SamplesToDo > 0);
 
-    DevFmtType_t<T> *outbase{static_cast<DevFmtType_t<T>*>(OutBuffer) + Offset*FrameStep};
-    size_t c{0};
+    DevFmtType_t<T> *outbase = static_cast<DevFmtType_t<T>*>(OutBuffer) + Offset*FrameStep;
     for(const FloatBufferLine &inbuf : InBuffer)
     {
         DevFmtType_t<T> *out{outbase++};
@@ -1903,93 +1923,57 @@ void Write(const al::span<const FloatBufferLine> InBuffer, void *OutBuffer, cons
             out += FrameStep;
         };
         std::for_each(inbuf.begin(), inbuf.begin()+SamplesToDo, conv_sample);
-        ++c;
-    }
-    if(const size_t extra{FrameStep - c})
-    {
-        const auto silence = SampleConv<DevFmtType_t<T>>(0.0f);
-        for(size_t i{0};i < SamplesToDo;++i)
-        {
-            std::fill_n(outbase, extra, silence);
-            outbase += FrameStep;
-        }
     }
 }
 
 } // namespace
 
-uint DeviceBase::renderSamples(const uint numSamples)
-{
-    const uint samplesToDo{minu(numSamples, BufferLineSize)};
-
-    /* Clear main mixing buffers. */
-    for(FloatBufferLine &buffer : MixBuffer)
-        buffer.fill(0.0f);
-
-    /* Increment the mix count at the start (lsb should now be 1). */
-    IncrementRef(MixCount);
-
-    /* Process and mix each context's sources and effects. */
-    ProcessContexts(this, samplesToDo);
-
-    /* Increment the clock time. Every second's worth of samples is converted
-     * and added to clock base so that large sample counts don't overflow
-     * during conversion. This also guarantees a stable conversion.
-     */
-    SamplesDone += samplesToDo;
-    ClockBase += std::chrono::seconds{SamplesDone / Frequency};
-    SamplesDone %= Frequency;
-
-    /* Increment the mix count at the end (lsb should now be 0). */
-    IncrementRef(MixCount);
-
-    /* Apply any needed post-process for finalizing the Dry mix to the RealOut
-     * (Ambisonic decode, UHJ encode, etc).
-     */
-    postProcess(samplesToDo);
-
-    /* Apply compression, limiting sample amplitude if needed or desired. */
-    if(Limiter) Limiter->process(samplesToDo, RealOut.Buffer.data());
-
-    /* Apply delays and attenuation for mismatched speaker distances. */
-    if(ChannelDelays)
-        ApplyDistanceComp(RealOut.Buffer, samplesToDo, ChannelDelays->mChannels.data());
-
-    /* Apply dithering. The compressor should have left enough headroom for the
-     * dither noise to not saturate.
-     */
-    if(DitherDepth > 0.0f)
-        ApplyDither(RealOut.Buffer, &DitherSeed, DitherDepth, samplesToDo);
-
-    return samplesToDo;
-}
-
-void DeviceBase::renderSamples(const al::span<float*> outBuffers, const uint numSamples)
-{
-    FPUCtl mixer_mode{};
-    uint total{0};
-    while(const uint todo{numSamples - total})
-    {
-        const uint samplesToDo{renderSamples(todo)};
-
-        auto *srcbuf = RealOut.Buffer.data();
-        for(auto *dstbuf : outBuffers)
-        {
-            std::copy_n(srcbuf->data(), samplesToDo, dstbuf + total);
-            ++srcbuf;
-        }
-
-        total += samplesToDo;
-    }
-}
-
 void DeviceBase::renderSamples(void *outBuffer, const uint numSamples, const size_t frameStep)
 {
     FPUCtl mixer_mode{};
-    uint total{0};
-    while(const uint todo{numSamples - total})
+    for(uint written{0u};written < numSamples;)
     {
-        const uint samplesToDo{renderSamples(todo)};
+        const uint samplesToDo{minu(numSamples-written, BufferLineSize)};
+
+        /* Clear main mixing buffers. */
+        for(FloatBufferLine &buffer : MixBuffer)
+            buffer.fill(0.0f);
+
+        /* Increment the mix count at the start (lsb should now be 1). */
+        IncrementRef(MixCount);
+
+        /* Process and mix each context's sources and effects. */
+        ProcessContexts(this, samplesToDo);
+
+        /* Increment the clock time. Every second's worth of samples is
+         * converted and added to clock base so that large sample counts don't
+         * overflow during conversion. This also guarantees a stable
+         * conversion.
+         */
+        SamplesDone += samplesToDo;
+        ClockBase += std::chrono::seconds{SamplesDone / Frequency};
+        SamplesDone %= Frequency;
+
+        /* Increment the mix count at the end (lsb should now be 0). */
+        IncrementRef(MixCount);
+
+        /* Apply any needed post-process for finalizing the Dry mix to the
+         * RealOut (Ambisonic decode, UHJ encode, etc).
+         */
+        postProcess(samplesToDo);
+
+        /* Apply compression, limiting sample amplitude if needed or desired. */
+        if(Limiter) Limiter->process(samplesToDo, RealOut.Buffer.data());
+
+        /* Apply delays and attenuation for mismatched speaker distances. */
+        if(ChannelDelays)
+            ApplyDistanceComp(RealOut.Buffer, samplesToDo, ChannelDelays->mChannels.data());
+
+        /* Apply dithering. The compressor should have left enough headroom for
+         * the dither noise to not saturate.
+         */
+        if(DitherDepth > 0.0f)
+            ApplyDither(RealOut.Buffer, &DitherSeed, DitherDepth, samplesToDo);
 
         if LIKELY(outBuffer)
         {
@@ -1999,7 +1983,7 @@ void DeviceBase::renderSamples(void *outBuffer, const uint numSamples, const siz
             switch(FmtType)
             {
 #define HANDLE_WRITE(T) case T:                                               \
-    Write<T>(RealOut.Buffer, outBuffer, total, samplesToDo, frameStep); break;
+    Write<T>(RealOut.Buffer, outBuffer, written, samplesToDo, frameStep); break;
             HANDLE_WRITE(DevFmtByte)
             HANDLE_WRITE(DevFmtUByte)
             HANDLE_WRITE(DevFmtShort)
@@ -2011,7 +1995,7 @@ void DeviceBase::renderSamples(void *outBuffer, const uint numSamples, const siz
             }
         }
 
-        total += samplesToDo;
+        written += samplesToDo;
     }
 }
 
@@ -2020,7 +2004,7 @@ void DeviceBase::handleDisconnect(const char *msg, ...)
     if(!Connected.exchange(false, std::memory_order_acq_rel))
         return;
 
-    AsyncEvent evt{AsyncEvent::Disconnected};
+    AsyncEvent evt{EventType_Disconnected};
 
     va_list args;
     va_start(args, msg);
@@ -2034,13 +2018,13 @@ void DeviceBase::handleDisconnect(const char *msg, ...)
     for(ContextBase *ctx : *mContexts.load())
     {
         const uint enabledevt{ctx->mEnabledEvts.load(std::memory_order_acquire)};
-        if((enabledevt&AsyncEvent::Disconnected))
+        if((enabledevt&EventType_Disconnected))
         {
             RingBuffer *ring{ctx->mAsyncEvents.get()};
             auto evt_data = ring->getWriteVector().first;
             if(evt_data.len > 0)
             {
-                al::construct_at(reinterpret_cast<AsyncEvent*>(evt_data.buf), evt);
+                ::new(evt_data.buf) AsyncEvent{evt};
                 ring->writeAdvance(1);
                 ctx->mEventSem.post();
             }

@@ -203,8 +203,8 @@ int WaveBackend::mixerProc()
 
 void WaveBackend::open(const char *name)
 {
-    auto fname = ConfigValueStr(nullptr, "wave", "file");
-    if(!fname) throw al::backend_exception{al::backend_error::NoDevice,
+    const char *fname{GetConfigValue(nullptr, "wave", "file", "")};
+    if(!fname[0]) throw al::backend_exception{al::backend_error::NoDevice,
         "No wave output filename"};
 
     if(!name)
@@ -218,15 +218,15 @@ void WaveBackend::open(const char *name)
 
 #ifdef _WIN32
     {
-        std::wstring wname{utf8_to_wstr(fname->c_str())};
+        std::wstring wname{utf8_to_wstr(fname)};
         mFile = _wfopen(wname.c_str(), L"wb");
     }
 #else
-    mFile = fopen(fname->c_str(), "wb");
+    mFile = fopen(fname, "wb");
 #endif
     if(!mFile)
         throw al::backend_exception{al::backend_error::DeviceError, "Could not open file '%s': %s",
-            fname->c_str(), strerror(errno)};
+            fname, strerror(errno)};
 
     mDevice->DeviceName = name;
 }
@@ -269,6 +269,7 @@ bool WaveBackend::reset()
     case DevFmtStereo: chanmask = 0x01 | 0x02; break;
     case DevFmtQuad:   chanmask = 0x01 | 0x02 | 0x10 | 0x20; break;
     case DevFmtX51: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x200 | 0x400; break;
+    case DevFmtX51Rear: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x010 | 0x020; break;
     case DevFmtX61: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x100 | 0x200 | 0x400; break;
     case DevFmtX71: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x010 | 0x020 | 0x200 | 0x400; break;
     case DevFmtAmbi3D:

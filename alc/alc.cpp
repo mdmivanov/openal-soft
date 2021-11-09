@@ -106,9 +106,6 @@
 #include "backends/base.h"
 #include "backends/null.h"
 #include "backends/loopback.h"
-#ifdef HAVE_PIPEWIRE
-#include "backends/pipewire.h"
-#endif
 #ifdef HAVE_JACK
 #include "backends/jack.h"
 #endif
@@ -200,8 +197,14 @@ struct BackendInfo {
 };
 
 BackendInfo BackendList[] = {
+#ifdef HAVE_JACK
+    { "jack", JackBackendFactory::getFactory },
+#endif
 #ifdef HAVE_PULSEAUDIO
     { "pulse", PulseBackendFactory::getFactory },
+#endif
+#ifdef HAVE_ALSA
+    { "alsa", AlsaBackendFactory::getFactory },
 #endif
 #ifdef HAVE_WASAPI
     { "wasapi", WasapiBackendFactory::getFactory },
@@ -221,12 +224,6 @@ BackendInfo BackendList[] = {
 #ifdef HAVE_SNDIO
     { "sndio", SndIOBackendFactory::getFactory },
 #endif
-#ifdef HAVE_JACK
-    { "jack", JackBackendFactory::getFactory },
-#endif
-#ifdef HAVE_ALSA
-    { "alsa", AlsaBackendFactory::getFactory },
-#endif
 #ifdef HAVE_OSS
     { "oss", OSSBackendFactory::getFactory },
 #endif
@@ -244,9 +241,6 @@ BackendInfo BackendList[] = {
 #endif
 
     { "null", NullBackendFactory::getFactory },
-#ifdef HAVE_PIPEWIRE
-    { "pipewire", PipeWireBackendFactory::getFactory },
-#endif
 #ifdef HAVE_WAVE
     { "wave", WaveBackendFactory::getFactory },
 #endif
@@ -523,11 +517,6 @@ constexpr struct {
     DECL(ALC_SN3D_SOFT),
 
     DECL(ALC_OUTPUT_LIMITER_SOFT),
-
-    DECL(ALC_OUTPUT_MODE_SOFT),
-    DECL(ALC_NORMAL_SOFT),
-    DECL(ALC_STEREO_UHJ_SOFT),
-    DECL(ALC_ANY_SOFT),
 
     DECL(ALC_NO_ERROR),
     DECL(ALC_INVALID_DEVICE),
@@ -938,7 +927,6 @@ constexpr ALCchar alcExtensionList[] =
     "ALC_SOFT_loopback "
     "ALC_SOFT_loopback_bformat "
     "ALC_SOFT_output_limiter "
-    "ALC_SOFTX_output_mode "
     "ALC_SOFT_pause_device "
     "ALC_SOFTX_reopen_device";
 constexpr int alcMajorVersion{1};
@@ -1371,7 +1359,8 @@ ALCenum EnumFromDevFmt(DevFmtChannels channels)
     case DevFmtMono: return ALC_MONO_SOFT;
     case DevFmtStereo: return ALC_STEREO_SOFT;
     case DevFmtQuad: return ALC_QUAD_SOFT;
-    case DevFmtX51: return ALC_5POINT1_SOFT;
+    case DevFmtX51: /* fall-through */
+    case DevFmtX51Rear: return ALC_5POINT1_SOFT;
     case DevFmtX61: return ALC_6POINT1_SOFT;
     case DevFmtX71: return ALC_7POINT1_SOFT;
     case DevFmtAmbi3D: return ALC_BFORMAT3D_SOFT;
@@ -1454,6 +1443,11 @@ const std::array<InputRemixMap,3> X51Downmix{{
     { BackRight,  {{{SideLeft, 0.0f}, {SideRight, 1.0f}}} },
     { BackCenter, {{{SideLeft, 0.5f}, {SideRight, 0.5f}}} },
 }};
+const std::array<InputRemixMap,3> X51RearDownmix{{
+    { SideLeft,   {{{BackLeft, 1.0f}, {BackRight, 0.0f}}} },
+    { SideRight,  {{{BackLeft, 0.0f}, {BackRight, 1.0f}}} },
+    { BackCenter, {{{BackLeft, 0.5f}, {BackRight, 0.5f}}} },
+}};
 const std::array<InputRemixMap,2> X61Downmix{{
     { BackLeft,  {{{BackCenter, 0.5f}, {SideLeft,  0.5f}}} },
     { BackRight, {{{BackCenter, 0.5f}, {SideRight, 0.5f}}} },
@@ -1526,9 +1520,10 @@ static inline void UpdateClockBase(ALCdevice *device)
  */
 ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 {
+    HrtfRequestMode hrtf_userreq{Hrtf_Default};
+    HrtfRequestMode hrtf_appreq{Hrtf_Default};
     ALCenum gainLimiter{device->LimiterState};
     uint new_sends{device->NumAuxSends};
-    al::optional<StereoEncoding> stereomode{};
     DevFmtChannels oldChans;
     DevFmtType oldType;
     int hrtf_id{-1};
@@ -1551,7 +1546,6 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         al::optional<DevFmtType> opttype;
         al::optional<DevAmbiLayout> optlayout;
         al::optional<DevAmbiScaling> optscale;
-        al::optional<bool> opthrtf;
 
         uint aorder{0u};
         uint freq{0u};
@@ -1614,11 +1608,11 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             case ALC_HRTF_SOFT:
                 TRACE_ATTR(ALC_HRTF_SOFT, attrList[attrIdx + 1]);
                 if(attrList[attrIdx + 1] == ALC_FALSE)
-                    opthrtf = false;
+                    hrtf_appreq = Hrtf_Disable;
                 else if(attrList[attrIdx + 1] == ALC_TRUE)
-                    opthrtf = true;
+                    hrtf_appreq = Hrtf_Enable;
                 else
-                    opthrtf = al::nullopt;
+                    hrtf_appreq = Hrtf_Default;
                 break;
 
             case ALC_HRTF_ID_SOFT:
@@ -1629,18 +1623,6 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             case ALC_OUTPUT_LIMITER_SOFT:
                 gainLimiter = attrList[attrIdx + 1];
                 TRACE_ATTR(ALC_OUTPUT_LIMITER_SOFT, gainLimiter);
-                break;
-
-            case ALC_OUTPUT_MODE_SOFT:
-                TRACE_ATTR(ALC_HRTF_SOFT, attrList[attrIdx + 1]);
-                if(attrList[attrIdx + 1] == ALC_HRTF_SOFT)
-                    stereomode = StereoEncoding::Hrtf;
-                else if(attrList[attrIdx + 1] == ALC_STEREO_UHJ_SOFT)
-                    stereomode = StereoEncoding::Uhj;
-                else if(attrList[attrIdx + 1] == ALC_NORMAL_SOFT)
-                    stereomode = StereoEncoding::Normal;
-                else
-                    stereomode = al::nullopt;
                 break;
 
             default:
@@ -1681,9 +1663,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
         UpdateClockBase(device);
 
-        if(!stereomode && opthrtf)
-            stereomode = *opthrtf ? StereoEncoding::Hrtf : StereoEncoding::Normal;
-
+        const char *devname{nullptr};
         if(loopback)
         {
             device->Frequency = freq;
@@ -1698,11 +1678,13 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         }
         else
         {
+            devname = device->DeviceName.c_str();
+
             device->BufferSize = DEFAULT_UPDATE_SIZE * DEFAULT_NUM_UPDATES;
             device->UpdateSize = DEFAULT_UPDATE_SIZE;
             device->Frequency = DEFAULT_OUTPUT_RATE;
 
-            freq = device->configValue<uint>(nullptr, "frequency").value_or(freq);
+            freq = ConfigValueUInt(devname, nullptr, "frequency").value_or(freq);
             if(freq < 1)
                 device->Flags.reset(FrequencyRequest);
             else
@@ -1717,10 +1699,10 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
                 device->Flags.set(FrequencyRequest);
             }
 
-            if(auto persizeopt = device->configValue<uint>(nullptr, "period_size"))
+            if(auto persizeopt = ConfigValueUInt(devname, nullptr, "period_size"))
                 device->UpdateSize = clampu(*persizeopt, 64, 8192);
 
-            if(auto peropt = device->configValue<uint>(nullptr, "periods"))
+            if(auto peropt = ConfigValueUInt(devname, nullptr, "periods"))
                 device->BufferSize = device->UpdateSize * clampu(*peropt, 2, 16);
             else
                 device->BufferSize = maxu(device->BufferSize, device->UpdateSize*2);
@@ -1729,7 +1711,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         if(numMono > INT_MAX-numStereo)
             numMono = INT_MAX-numStereo;
         numMono += numStereo;
-        if(auto srcsopt = device->configValue<uint>(nullptr, "sources"))
+        if(auto srcsopt = ConfigValueUInt(devname, nullptr, "sources"))
         {
             if(*srcsopt <= 0) numMono = 256;
             else numMono = *srcsopt;
@@ -1743,7 +1725,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         device->NumMonoSources = numMono;
         device->NumStereoSources = numStereo;
 
-        if(auto sendsopt = device->configValue<int>(nullptr, "sends"))
+        if(auto sendsopt = ConfigValueInt(devname, nullptr, "sends"))
             new_sends = minu(numSends, static_cast<uint>(clampi(*sendsopt, 0, MAX_SENDS)));
         else
             new_sends = numSends;
@@ -1779,27 +1761,23 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     device->DitherSeed = DitherRNGSeed;
 
     /*************************************************************************
-     * Update device format request if HRTF or UHJ is requested
+     * Update device format request if HRTF is requested
      */
     device->mHrtfStatus = ALC_HRTF_DISABLED_SOFT;
     if(device->Type != DeviceType::Loopback)
     {
-        if(auto hrtfopt = device->configValue<std::string>(nullptr, "hrtf"))
+        if(auto hrtfopt = ConfigValueStr(device->DeviceName.c_str(), nullptr, "hrtf"))
         {
             const char *hrtf{hrtfopt->c_str()};
             if(al::strcasecmp(hrtf, "true") == 0)
-                stereomode = StereoEncoding::Hrtf;
+                hrtf_userreq = Hrtf_Enable;
             else if(al::strcasecmp(hrtf, "false") == 0)
-            {
-                if(!stereomode || *stereomode == StereoEncoding::Hrtf)
-                    stereomode = StereoEncoding::Normal;
-            }
+                hrtf_userreq = Hrtf_Disable;
             else if(al::strcasecmp(hrtf, "auto") != 0)
                 ERR("Unexpected hrtf value: %s\n", hrtf);
         }
 
-        /* If the app or user wants HRTF or UHJ, try to set stereo playback. */
-        if(stereomode && *stereomode != StereoEncoding::Normal)
+        if(hrtf_userreq == Hrtf_Enable || (hrtf_userreq != Hrtf_Disable && hrtf_appreq == Hrtf_Enable))
         {
             device->FmtChans = DevFmtStereo;
             device->Flags.set(ChannelsRequest);
@@ -1855,39 +1833,13 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     case DevFmtStereo: device->RealOut.RemixMap = StereoDownmix; break;
     case DevFmtQuad: device->RealOut.RemixMap = QuadDownmix; break;
     case DevFmtX51: device->RealOut.RemixMap = X51Downmix; break;
+    case DevFmtX51Rear: device->RealOut.RemixMap = X51RearDownmix; break;
     case DevFmtX61: device->RealOut.RemixMap = X61Downmix; break;
     case DevFmtX71: device->RealOut.RemixMap = X71Downmix; break;
     case DevFmtAmbi3D: break;
     }
 
-    if(device->Type != DeviceType::Loopback)
-    {
-        if(auto modeopt = device->configValue<std::string>(nullptr, "stereo-mode"))
-        {
-            const char *mode{modeopt->c_str()};
-            if(al::strcasecmp(mode, "headphones") == 0)
-                device->Flags.set(DirectEar);
-            else if(al::strcasecmp(mode, "speakers") == 0)
-                device->Flags.reset(DirectEar);
-            else if(al::strcasecmp(mode, "auto") != 0)
-                ERR("Unexpected stereo-mode: %s\n", mode);
-        }
-
-        if(auto encopt = device->configValue<std::string>(nullptr, "stereo-encoding"))
-        {
-            const char *mode{encopt->c_str()};
-            if(al::strcasecmp(mode, "panpot") == 0)
-                stereomode = al::make_optional(StereoEncoding::Normal);
-            else if(al::strcasecmp(mode, "uhj") == 0)
-                stereomode = al::make_optional(StereoEncoding::Uhj);
-            else if(al::strcasecmp(mode, "hrtf") == 0)
-                stereomode = al::make_optional(StereoEncoding::Hrtf);
-            else
-                ERR("Unexpected stereo-encoding: %s\n", mode);
-        }
-    }
-
-    aluInitRenderer(device, hrtf_id, stereomode);
+    aluInitRenderer(device, hrtf_id, hrtf_appreq, hrtf_userreq);
 
     device->NumAuxSends = new_sends;
     TRACE("Max sources: %d (%d + %d), effect slots: %d, sends: %d\n",
@@ -1905,9 +1857,9 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             sample_delay += FrontStablizer::DelayLength;
     }
 
-    if(device->getConfigValueBool(nullptr, "dither", 1))
+    if(GetConfigValueBool(device->DeviceName.c_str(), nullptr, "dither", 1))
     {
-        int depth{device->configValue<int>(nullptr, "dither-depth").value_or(0)};
+        int depth{ConfigValueInt(device->DeviceName.c_str(), nullptr, "dither-depth").value_or(0)};
         if(depth <= 0)
         {
             switch(device->FmtType)
@@ -1940,7 +1892,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
               device->DitherDepth);
 
     device->LimiterState = gainLimiter;
-    if(auto limopt = device->configValue<bool>(nullptr, "output-limiter"))
+    if(auto limopt = ConfigValueBool(device->DeviceName.c_str(), nullptr, "output-limiter"))
         gainLimiter = *limopt ? ALC_TRUE : ALC_FALSE;
 
     /* Valid values for gainLimiter are ALC_DONT_CARE_SOFT, ALC_TRUE, and
@@ -2315,10 +2267,8 @@ START_API_FUNC
     case ALC_ALL_DEVICES_SPECIFIER:
         if(DeviceRef dev{VerifyDevice(Device)})
         {
-            if(dev->Type == DeviceType::Capture)
+            if(dev->Type != DeviceType::Playback)
                 alcSetError(dev.get(), ALC_INVALID_ENUM);
-            else if(dev->Type == DeviceType::Loopback)
-                value = alcDefaultName;
             else
             {
                 std::lock_guard<std::mutex> _{dev->StateLock};
@@ -2724,15 +2674,6 @@ static size_t GetIntegerv(ALCdevice *device, ALCenum param, const al::span<int> 
         values[0] = MaxAmbiOrder;
         return 1;
 
-    case ALC_OUTPUT_MODE_SOFT:
-        if(device->mHrtf)
-            values[0] = ALC_HRTF_SOFT;
-        else if(device->mUhjEncoder)
-            values[0] = ALC_STEREO_UHJ_SOFT;
-        else
-            values[0] = ALC_NORMAL_SOFT;
-        return 1;
-
     default:
         alcSetError(device, ALC_INVALID_ENUM);
     }
@@ -2992,7 +2933,7 @@ START_API_FUNC
     ContextRef context{new ALCcontext{dev}};
     context->init();
 
-    if(auto volopt = dev->configValue<float>(nullptr, "volume-adjust"))
+    if(auto volopt = ConfigValueFloat(dev->DeviceName.c_str(), nullptr, "volume-adjust"))
     {
         const float valf{*volopt};
         if(!std::isfinite(valf))
@@ -3227,7 +3168,8 @@ START_API_FUNC
         return nullptr;
     }
 
-    if(auto chanopt = device->configValue<std::string>(nullptr, "channels"))
+    deviceName = device->DeviceName.c_str();
+    if(auto chanopt = ConfigValueStr(deviceName, nullptr, "channels"))
     {
         static const struct ChannelMap {
             const char name[16];
@@ -3240,7 +3182,7 @@ START_API_FUNC
             { "surround51", DevFmtX51,    0 },
             { "surround61", DevFmtX61,    0 },
             { "surround71", DevFmtX71,    0 },
-            { "surround51rear", DevFmtX51, 0 },
+            { "surround51rear", DevFmtX51Rear, 0 },
             { "ambi1", DevFmtAmbi3D, 1 },
             { "ambi2", DevFmtAmbi3D, 2 },
             { "ambi3", DevFmtAmbi3D, 3 },
@@ -3260,7 +3202,7 @@ START_API_FUNC
             device->Flags.set(ChannelsRequest);
         }
     }
-    if(auto typeopt = device->configValue<std::string>(nullptr, "sample-type"))
+    if(auto typeopt = ConfigValueStr(deviceName, nullptr, "sample-type"))
     {
         static const struct TypeMap {
             const char name[16];
@@ -3289,7 +3231,7 @@ START_API_FUNC
         }
     }
 
-    if(uint freq{device->configValue<uint>(nullptr, "frequency").value_or(0u)})
+    if(uint freq{ConfigValueUInt(deviceName, nullptr, "frequency").value_or(0u)})
     {
         if(freq < MIN_OUTPUT_RATE || freq > MAX_OUTPUT_RATE)
         {
@@ -3304,28 +3246,28 @@ START_API_FUNC
         device->Flags.set(FrequencyRequest);
     }
 
-    if(auto persizeopt = device->configValue<uint>(nullptr, "period_size"))
+    if(auto persizeopt = ConfigValueUInt(deviceName, nullptr, "period_size"))
         device->UpdateSize = clampu(*persizeopt, 64, 8192);
 
-    if(auto peropt = device->configValue<uint>(nullptr, "periods"))
+    if(auto peropt = ConfigValueUInt(deviceName, nullptr, "periods"))
         device->BufferSize = device->UpdateSize * clampu(*peropt, 2, 16);
     else
         device->BufferSize = maxu(device->BufferSize, device->UpdateSize*2);
 
-    if(auto srcsmax = device->configValue<uint>(nullptr, "sources").value_or(0))
+    if(auto srcsmax = ConfigValueUInt(deviceName, nullptr, "sources").value_or(0))
         device->SourcesMax = srcsmax;
 
-    if(auto slotsmax = device->configValue<uint>(nullptr, "slots").value_or(0))
+    if(auto slotsmax = ConfigValueUInt(deviceName, nullptr, "slots").value_or(0))
         device->AuxiliaryEffectSlotMax = minu(slotsmax, INT_MAX);
 
-    if(auto sendsopt = device->configValue<int>(nullptr, "sends"))
+    if(auto sendsopt = ConfigValueInt(deviceName, nullptr, "sends"))
         device->NumAuxSends = minu(DEFAULT_SENDS,
             static_cast<uint>(clampi(*sendsopt, 0, MAX_SENDS)));
 
     device->NumStereoSources = 1;
     device->NumMonoSources = device->SourcesMax - device->NumStereoSources;
 
-    if(auto ambiopt = device->configValue<std::string>(nullptr, "ambi-format"))
+    if(auto ambiopt = ConfigValueStr(deviceName, nullptr, "ambi-format"))
     {
         const ALCchar *fmt{ambiopt->c_str()};
         if(al::strcasecmp(fmt, "fuma") == 0)

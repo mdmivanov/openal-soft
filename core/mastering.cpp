@@ -334,7 +334,7 @@ std::unique_ptr<Compressor> Compressor::Create(const size_t NumChans, const floa
             size += sizeof(*Compressor::mHold);
     }
 
-    auto Comp = CompressorPtr{al::construct_at(static_cast<Compressor*>(al_calloc(16, size)))};
+    auto Comp = std::unique_ptr<Compressor>{new (al_calloc(16, size)) Compressor{}};
     Comp->mNumChans = NumChans;
     Comp->mAuto.Knee = AutoKnee;
     Comp->mAuto.Attack = AutoAttack;
@@ -361,15 +361,17 @@ std::unique_ptr<Compressor> Compressor::Create(const size_t NumChans, const floa
     {
         if(hold > 1)
         {
-            Comp->mHold = al::construct_at(reinterpret_cast<SlidingHold*>(Comp.get() + 1));
+            Comp->mHold = ::new (static_cast<void*>(Comp.get() + 1)) SlidingHold{};
             Comp->mHold->mValues[0] = -std::numeric_limits<float>::infinity();
             Comp->mHold->mExpiries[0] = hold;
             Comp->mHold->mLength = hold;
-            Comp->mDelay = reinterpret_cast<FloatBufferLine*>(Comp->mHold + 1);
+            Comp->mDelay = ::new(static_cast<void*>(Comp->mHold + 1)) FloatBufferLine[NumChans];
         }
         else
-            Comp->mDelay = reinterpret_cast<FloatBufferLine*>(Comp.get() + 1);
-        std::uninitialized_fill_n(Comp->mDelay, NumChans, FloatBufferLine{});
+        {
+            Comp->mDelay = ::new(static_cast<void*>(Comp.get() + 1)) FloatBufferLine[NumChans];
+        }
+        std::fill_n(Comp->mDelay, NumChans, FloatBufferLine{});
     }
 
     Comp->mCrestCoeff = std::exp(-1.0f / (0.200f * SampleRate)); // 200ms

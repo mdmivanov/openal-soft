@@ -13,11 +13,9 @@
 #include "pragmadefs.h"
 
 
+[[gnu::alloc_align(1), gnu::alloc_size(2)]] void *al_malloc(size_t alignment, size_t size);
+[[gnu::alloc_align(1), gnu::alloc_size(2)]] void *al_calloc(size_t alignment, size_t size);
 void al_free(void *ptr) noexcept;
-[[gnu::alloc_align(1), gnu::alloc_size(2), gnu::malloc]]
-void *al_malloc(size_t alignment, size_t size);
-[[gnu::alloc_align(1), gnu::alloc_size(2), gnu::malloc]]
-void *al_calloc(size_t alignment, size_t size);
 
 
 #define DISABLE_ALLOC()                                                       \
@@ -97,18 +95,12 @@ struct allocator {
     void deallocate(T *p, std::size_t) noexcept { al_free(p); }
 };
 template<typename T, std::size_t N, typename U, std::size_t M>
-constexpr bool operator==(const allocator<T,N>&, const allocator<U,M>&) noexcept { return true; }
+bool operator==(const allocator<T,N>&, const allocator<U,M>&) noexcept { return true; }
 template<typename T, std::size_t N, typename U, std::size_t M>
-constexpr bool operator!=(const allocator<T,N>&, const allocator<U,M>&) noexcept { return false; }
+bool operator!=(const allocator<T,N>&, const allocator<U,M>&) noexcept { return false; }
 
 template<size_t alignment, typename T>
-[[gnu::assume_aligned(alignment)]] constexpr T* assume_aligned(T *ptr) noexcept { return ptr; }
-
-
-template<typename T, typename ...Args>
-constexpr T* construct_at(T *ptr, Args&& ...args)
-    noexcept(std::is_nothrow_constructible<T, Args...>::value)
-{ return ::new(static_cast<void*>(ptr)) T{std::forward<Args>(args)...}; }
+[[gnu::assume_aligned(alignment)]] inline T* assume_aligned(T *ptr) noexcept { return ptr; }
 
 /* At least VS 2015 complains that 'ptr' is unused when the given type's
  * destructor is trivial (a no-op). So disable that warning for this call.
@@ -122,14 +114,14 @@ destroy_at(T *ptr) noexcept(std::is_nothrow_destructible<T>::value)
 DIAGNOSTIC_POP
 template<typename T>
 constexpr std::enable_if_t<std::is_array<T>::value>
-destroy_at(T *ptr) noexcept(std::is_nothrow_destructible<std::remove_all_extents_t<T>>::value)
+destroy_at(T *ptr) noexcept(std::is_nothrow_destructible<T>::value)
 {
     for(auto &elem : *ptr)
         al::destroy_at(std::addressof(elem));
 }
 
 template<typename T>
-constexpr void destroy(T first, T end) noexcept(noexcept(al::destroy_at(std::addressof(*first))))
+constexpr void destroy(T first, T end)
 {
     while(first != end)
     {
@@ -140,7 +132,7 @@ constexpr void destroy(T first, T end) noexcept(noexcept(al::destroy_at(std::add
 
 template<typename T, typename N>
 constexpr std::enable_if_t<std::is_integral<N>::value,T>
-destroy_n(T first, N count) noexcept(noexcept(al::destroy_at(std::addressof(*first))))
+destroy_n(T first, N count)
 {
     if(count != 0)
     {
@@ -154,8 +146,8 @@ destroy_n(T first, N count) noexcept(noexcept(al::destroy_at(std::addressof(*fir
 
 
 template<typename T, typename N>
-inline std::enable_if_t<std::is_integral<N>::value,
-T> uninitialized_default_construct_n(T first, N count)
+inline std::enable_if_t<std::is_integral<N>::value,T>
+uninitialized_default_construct_n(T first, N count)
 {
     using ValueT = typename std::iterator_traits<T>::value_type;
     T current{first};
@@ -180,7 +172,10 @@ T> uninitialized_default_construct_n(T first, N count)
  * trivially destructible.
  */
 template<typename T, size_t alignment, bool = std::is_trivially_destructible<T>::value>
-struct FlexArrayStorage {
+struct FlexArrayStorage;
+
+template<typename T, size_t alignment>
+struct FlexArrayStorage<T,alignment,true> {
     const size_t mSize;
     union {
         char mDummy;
@@ -253,7 +248,7 @@ struct FlexArray {
     static std::unique_ptr<FlexArray> Create(index_type count)
     {
         void *ptr{al_calloc(alignof(FlexArray), Sizeof(count))};
-        return std::unique_ptr<FlexArray>{al::construct_at(static_cast<FlexArray*>(ptr), count)};
+        return std::unique_ptr<FlexArray>{new(ptr) FlexArray{count}};
     }
 
     FlexArray(index_type size) : mStore{size} { }

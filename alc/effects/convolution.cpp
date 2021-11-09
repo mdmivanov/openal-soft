@@ -91,13 +91,8 @@ void LoadSamples(double *RESTRICT dst, const al::byte *src, const size_t srcstep
 
 inline auto& GetAmbiScales(AmbiScaling scaletype) noexcept
 {
-    switch(scaletype)
-    {
-    case AmbiScaling::FuMa: return AmbiScale::FromFuMa();
-    case AmbiScaling::SN3D: return AmbiScale::FromSN3D();
-    case AmbiScaling::UHJ: return AmbiScale::FromUHJ();
-    case AmbiScaling::N3D: break;
-    }
+    if(scaletype == AmbiScaling::FuMa) return AmbiScale::FromFuMa();
+    if(scaletype == AmbiScaling::SN3D) return AmbiScale::FromSN3D();
     return AmbiScale::FromN3D();
 }
 

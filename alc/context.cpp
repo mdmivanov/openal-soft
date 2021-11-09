@@ -289,7 +289,6 @@ void ALCcontext::init()
     mExtensionList = alExtList;
 
 
-    mParams.Position = alu::Vector{0.0f, 0.0f, 0.0f, 1.0f};
     mParams.Matrix = alu::Matrix::Identity();
     mParams.Velocity = alu::Vector{};
     mParams.Gain = mListener.Gain;

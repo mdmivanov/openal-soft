@@ -79,7 +79,6 @@ struct ContextParams {
     std::atomic<ContextProps*> ContextUpdate{nullptr};
     std::atomic<ListenerProps*> ListenerUpdate{nullptr};
 
-    alu::Vector Position{};
     alu::Matrix Matrix{alu::Matrix::Identity()};
     alu::Vector Velocity{};
 
