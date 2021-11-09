@@ -110,9 +110,9 @@ if(DEFINED ALSOFT_AMBDEC_PRESETS)
     message(WARNING "ALSOFT_AMBDEC_PRESETS is deprecated. Use ALSOFT_INSTALL_AMBDEC_PRESETS instead")
 endif()
 
-/Users/admin/Downloads/adxe-dev/CMakeLists.txt
+
 set(CPP_DEFS ) # C pre-processor, not C++
-set(INC_PATHS )/Users/admin/Downloads/adxe-dev/README_CN.md
+set(INC_PATHS )
 set(C_FLAGS )
 set(LINKER_FLAGS )
 set(EXTRA_LIBS )
